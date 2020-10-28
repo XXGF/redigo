@@ -33,12 +33,14 @@ var (
 	_ ConnWithTimeout = (*conn)(nil)
 )
 
+// TODO conn的真正实现
 // conn is the low-level implementation of Conn
 type conn struct {
 	// Shared
 	mu      sync.Mutex
 	pending int
 	err     error
+	// golang SDK的conn
 	conn    net.Conn
 
 	// Read
@@ -186,9 +188,11 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 		option.f(&do)
 	}
 	if do.dial == nil {
+		// dialer 是 *net.Dialer类型，do.dialer.Dial 是 golang SDK的方法 TODO 待探索
 		do.dial = do.dialer.Dial
 	}
 
+	// 拿到 golang SDK 的连接对象
 	netConn, err := do.dial(network, address)
 	if err != nil {
 		return nil, err
@@ -218,10 +222,11 @@ func Dial(network, address string, options ...DialOption) (Conn, error) {
 		netConn = tlsConn
 	}
 
+	// 封装 golang SDK的连接对象net.Conn
 	c := &conn{
 		conn:         netConn,
-		bw:           bufio.NewWriter(netConn),
-		br:           bufio.NewReader(netConn),
+		bw:           bufio.NewWriter(netConn),     // 写缓冲
+		br:           bufio.NewReader(netConn),     // 读缓冲
 		readTimeout:  do.readTimeout,
 		writeTimeout: do.writeTimeout,
 	}
@@ -390,11 +395,35 @@ func (c *conn) writeFloat64(n float64) error {
 	return c.writeBytes(strconv.AppendFloat(c.numScratch[:0], n, 'g', -1, 64))
 }
 
+// 向Redis发送命令
 func (c *conn) writeCommand(cmd string, args []interface{}) error {
+	// 开始通过conn，向Redis发送命令
+	// 按照 Redis自己定的通讯协议 发送
+	/*
+	例如：
+	*<参数数量> CR LF
+	$<参数1 的字节数量> CR LF
+	<参数1 的数据> CR LF
+	...
+	$<参数 N 的字节数量> CR LF
+	<参数 N 的数据> CR LF
+
+	*3				# 一共有3个参数，包括命令名称
+	$3              # 命令名称的大小
+	SET
+	$3 				#key的大小，这里 key 一共三个字节
+	key
+	$5 				#value的大小，这里 value 一共五个字节
+	value
+	*/
+
+	// 1. 写参数个数
 	c.writeLen('*', 1+len(args))
+	// 2. 写命令名称
 	if err := c.writeString(cmd); err != nil {
 		return err
 	}
+	// 3. 写key和value
 	for _, arg := range args {
 		if err := c.writeArg(arg, true); err != nil {
 			return err
@@ -643,6 +672,7 @@ func (c *conn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err
 	return
 }
 
+// 这是执行Redis命令的时候调用的DO方法，其他执行Redis命令的方法也是在这个文件里实现的
 func (c *conn) Do(cmd string, args ...interface{}) (interface{}, error) {
 	return c.DoWithTimeout(c.readTimeout, cmd, args...)
 }

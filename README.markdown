@@ -49,3 +49,9 @@ License
 -------
 
 Redigo is available under the [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.html).
+
+## 博客
+### 使用教程
+[Golang redigo使用笔记（一）：基本用法](https://www.dyxmq.cn/program/code/golang/golang-redigo-1.html)
+
+[Golang redigo使用笔记（二）：并发处理和连接池](https://www.dyxmq.cn/program/code/golang/golang-redigo-concuurent-and-connect-pool.html)

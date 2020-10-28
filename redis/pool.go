@@ -139,7 +139,7 @@ type Pool struct {
 	// the application. Argument t is the time that the connection was returned
 	// to the pool. If the function returns an error, then the connection is
 	// closed.
-	TestOnBorrow func(c Conn, t time.Time) error
+	TestOnBorrow func(c Conn, t time.Time) error		 // 测试空闲线程是否正常运行的函数
 
 	// Maximum number of idle connections in the pool.
 	MaxIdle int
@@ -286,14 +286,17 @@ func (p *Pool) lazyInit() {
 	// Slow path.
 	p.mu.Lock()
 	if p.chInitialized == 0 {
+		// p.MaxActive 最大活跃线程数
 		p.ch = make(chan struct{}, p.MaxActive)
 		if p.closed {
 			close(p.ch)
 		} else {
 			for i := 0; i < p.MaxActive; i++ {
+				// 填满ch ???
 				p.ch <- struct{}{}
 			}
 		}
+		// ch 初始化完成
 		atomic.StoreUint32(&p.chInitialized, 1)
 	}
 	p.mu.Unlock()
@@ -310,17 +313,18 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 
 		// wait indicates if we believe it will block so its not 100% accurate
 		// however for stats it should be good enough.
-		wait := len(p.ch) == 0
+		wait := len(p.ch) == 0   // ch 是否为空
 		var start time.Time
 		if wait {
 			start = time.Now()
 		}
+		// 从 ch 读取一个元素，如果 ch 为空，这里会阻塞
 		if ctx == nil {
 			<-p.ch
 		} else {
 			select {
 			case <-p.ch:
-			case <-ctx.Done():
+			case <-ctx.Done():          // ctx中设置了超时
 				return nil, ctx.Err()
 			}
 		}
@@ -337,56 +341,83 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 	}
 
 	// Prune stale connections at the back of the idle list.
+	// 在空闲列表的后面修剪陈旧的连接。
 	if p.IdleTimeout > 0 {
+		// 空闲连接总数
 		n := p.idle.count
 		for i := 0; i < n && p.idle.back != nil && p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()); i++ {
+			// p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()): 空闲连接超时
+
+			// 暂存空闲列表尾部连接
 			pc := p.idle.back
+			// 弹出空闲列表尾部的连接
 			p.idle.popBack()
+
 			p.mu.Unlock()
+
+			// 关闭超时连接
 			pc.c.Close()
+
 			p.mu.Lock()
+
+			// 打开的连接数 -1 【打开连接 == 活跃连接数 + 空闲连接数 ？】
 			p.active--
 		}
 	}
 
 	// Get idle connection from the front of idle list.
+	// 从空闲列表的前面获取空闲连接。
 	for p.idle.front != nil {
 		pc := p.idle.front
 		p.idle.popFront()
+
 		p.mu.Unlock()
-		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
+		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&     // 连接有效性测试，对应的是: TestOnBorrow: ping,                  // 检测连接是否有效
 			(p.MaxConnLifetime == 0 || nowFunc().Sub(pc.created) < p.MaxConnLifetime) {
+			// 获取连接成功
 			return pc, nil
 		}
+
+		// 连接失效，关闭连接
 		pc.c.Close()
 		p.mu.Lock()
 		p.active--
 	}
 
 	// Check for pool closed before dialing a new connection.
+	// 重新获取 Redis连接前，判断连接池是否关闭
 	if p.closed {
 		p.mu.Unlock()
 		return nil, errors.New("redigo: get on closed pool")
 	}
 
 	// Handle limit for p.Wait == false.
+	// 活跃连接数达到上限，且 客户端不阻塞等待
 	if !p.Wait && p.MaxActive > 0 && p.active >= p.MaxActive {
 		p.mu.Unlock()
 		return nil, ErrPoolExhausted
 	}
 
+	// 打开连接数+1
 	p.active++
 	p.mu.Unlock()
+
+	// 从Redis获取新连接
 	c, err := p.dial(ctx)
+	// 获取连接失败
 	if err != nil {
 		c = nil
 		p.mu.Lock()
 		p.active--
 		if p.ch != nil && !p.closed {
+			// 进入等待？？？
 			p.ch <- struct{}{}
 		}
 		p.mu.Unlock()
 	}
+	// err 交给调用者处理了
+
+	// 新创建的连接没有放到 p.idle，应该是连接关闭的时候再放
 	return &poolConn{c: c, created: nowFunc()}, err
 }
 
@@ -394,6 +425,27 @@ func (p *Pool) dial(ctx context.Context) (Conn, error) {
 	if p.DialContext != nil {
 		return p.DialContext(ctx)
 	}
+	// 这里的Dial，就是在 client.go:463 中的 initPool 方法中，初始化 p 对象的时候设置的
+	// 见：
+	/*
+	Dial: func() (c redis.Conn, err error) {
+		now := time.Now().Unix()
+		// 每3秒才会重试一次
+		if now < atomic.LoadInt64(&p.lastDialFail)+retryPeriod {
+			err = fmt.Errorf("dial fail retry limit")
+			return
+		}
+		c, err = dial(addr, p.connTimeout, p.readTimeout, p.writeTimeout)
+		if err != nil {
+			// 记录当前获取连接失败的时间戳，用于限制重试频率
+			atomic.StoreInt64(&p.lastDialFail, now)
+		} else {
+			atomic.StoreInt64(&p.lastDialFail, 0)
+		}
+		return
+	},
+	*/
+	// 这个方法会使用 提供的Redis的地址，返回与Redis的连接
 	if p.Dial != nil {
 		return p.Dial()
 	}
@@ -406,6 +458,7 @@ func (p *Pool) put(pc *poolConn, forceClose bool) error {
 		pc.t = nowFunc()
 		p.idle.pushFront(pc)
 		if p.idle.count > p.MaxIdle {
+			// 大于空闲活跃连接上线，则把尾部的去掉
 			pc = p.idle.back
 			p.idle.popBack()
 		} else {
