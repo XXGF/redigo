@@ -125,6 +125,7 @@ type Pool struct {
 	//
 	// The connection returned from Dial must not be in a special state
 	// (subscribed to pubsub channel, transaction started, ...).
+	// 连接Redis的函数
 	Dial func() (Conn, error)
 
 	// DialContext is an application supplied function for creating and configuring a
@@ -139,22 +140,27 @@ type Pool struct {
 	// the application. Argument t is the time that the connection was returned
 	// to the pool. If the function returns an error, then the connection is
 	// closed.
-	TestOnBorrow func(c Conn, t time.Time) error		 // 测试空闲线程是否正常运行的函数
+	// 测试空闲线程是否正常运行的函数
+	TestOnBorrow func(c Conn, t time.Time) error
 
 	// Maximum number of idle connections in the pool.
+	// 最大的空闲连接数
 	MaxIdle int
 
 	// Maximum number of connections allocated by the pool at a given time.
 	// When zero, there is no limit on the number of connections in the pool.
+	// 最大的活跃连接数，默认0则不限制
 	MaxActive int
 
 	// Close connections after remaining idle for this duration. If the value
 	// is zero, then idle connections are not closed. Applications should set
 	// the timeout to a value less than the server's timeout.
+	// 连接的超时时间，默认0则不做超时限制
 	IdleTimeout time.Duration
 
 	// If Wait is true and the pool is at the MaxActive limit, then Get() waits
 	// for a connection to be returned to the pool before returning.
+	// 当连接超过数量限制之后，是否等待直到有空闲连接释放
 	Wait bool
 
 	// Close connections older than this duration. If the value is zero, then
@@ -184,6 +190,9 @@ func NewPool(newFn func() (Conn, error), maxIdle int) *Pool {
 // error handling to the first use of the connection. If there is an error
 // getting an underlying connection, then the connection Err, Do, Send, Flush
 // and Receive methods return that error.
+// 如果获取连接出错，会返回 errorConn，
+// errorConn也是一个连接，只不过在调用 Do, Send, Flush 等方法时，才返回连接出错的错误
+// 这样调用方就不用处理空指针异常
 func (p *Pool) Get() Conn {
 	pc, err := p.get(nil)
 	if err != nil {
