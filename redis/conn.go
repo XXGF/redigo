@@ -429,6 +429,7 @@ func (c *conn) writeCommand(cmd string, args []interface{}) error {
 			return err
 		}
 	}
+	// 4. 只是写到write buffer，还未发送到网络连接
 	return nil
 }
 
@@ -481,6 +482,7 @@ func (c *conn) readLine() ([]byte, error) {
 	// To avoid allocations, attempt to read the line using ReadSlice. This
 	// call typically succeeds. The known case where the call fails is when
 	// reading the output from the MONITOR command.
+	// 读取命令回复
 	p, err := c.br.ReadSlice('\n')
 	if err == bufio.ErrBufferFull {
 		// The line does not fit in the bufio.Reader's buffer. Fall back to
@@ -568,6 +570,7 @@ func (c *conn) readReply() (interface{}, error) {
 	if len(line) == 0 {
 		return nil, protocolError("short response line")
 	}
+	// 按Redis的协议进行解析
 	switch line[0] {
 	case '+':
 		switch string(line[1:]) {
@@ -624,6 +627,7 @@ func (c *conn) Send(cmd string, args ...interface{}) error {
 	if c.writeTimeout != 0 {
 		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	}
+	// 11.将命令写到write buffer
 	if err := c.writeCommand(cmd, args); err != nil {
 		return c.fatal(err)
 	}
@@ -634,6 +638,7 @@ func (c *conn) Flush() error {
 	if c.writeTimeout != 0 {
 		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	}
+	// 22. 刷新write buffer，将其中的数据写到网络连接
 	if err := c.bw.Flush(); err != nil {
 		return c.fatal(err)
 	}
@@ -641,6 +646,7 @@ func (c *conn) Flush() error {
 }
 
 func (c *conn) Receive() (interface{}, error) {
+	// 33. 从read buffer，读取命令回复
 	return c.ReceiveWithTimeout(c.readTimeout)
 }
 
@@ -672,7 +678,7 @@ func (c *conn) ReceiveWithTimeout(timeout time.Duration) (reply interface{}, err
 	return
 }
 
-// 这是执行Redis命令的时候调用的DO方法，其他执行Redis命令的方法也是在这个文件里实现的
+//TODO 这是执行Redis命令的时候调用的DO方法，其他执行Redis命令的方法也是在这个文件里实现的
 func (c *conn) Do(cmd string, args ...interface{}) (interface{}, error) {
 	return c.DoWithTimeout(c.readTimeout, cmd, args...)
 }
@@ -691,12 +697,15 @@ func (c *conn) DoWithTimeout(readTimeout time.Duration, cmd string, args ...inte
 		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	}
 
+	// 真正执行命令
+	// 1. 将命令写入write buffer
 	if cmd != "" {
 		if err := c.writeCommand(cmd, args); err != nil {
 			return nil, c.fatal(err)
 		}
 	}
 
+	// 2. 刷新write buffer，将命令写入网络连接
 	if err := c.bw.Flush(); err != nil {
 		return nil, c.fatal(err)
 	}
@@ -705,11 +714,13 @@ func (c *conn) DoWithTimeout(readTimeout time.Duration, cmd string, args ...inte
 	if readTimeout != 0 {
 		deadline = time.Now().Add(readTimeout)
 	}
+	// 设置读取命令回复的超时时间
 	c.conn.SetReadDeadline(deadline)
 
 	if cmd == "" {
 		reply := make([]interface{}, pending)
 		for i := range reply {
+			// 3.从 read buffer 读取命令回复
 			r, e := c.readReply()
 			if e != nil {
 				return nil, c.fatal(e)
@@ -723,6 +734,7 @@ func (c *conn) DoWithTimeout(readTimeout time.Duration, cmd string, args ...inte
 	var reply interface{}
 	for i := 0; i <= pending; i++ {
 		var e error
+		// 3.读取命令回复
 		if reply, e = c.readReply(); e != nil {
 			return nil, c.fatal(e)
 		}

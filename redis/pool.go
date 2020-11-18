@@ -125,57 +125,51 @@ type Pool struct {
 	//
 	// The connection returned from Dial must not be in a special state
 	// (subscribed to pubsub channel, transaction started, ...).
-	// 连接Redis的函数
-	Dial func() (Conn, error)
+	Dial func() (Conn, error)												// 连接Redis的函数
 
 	// DialContext is an application supplied function for creating and configuring a
 	// connection with the given context.
 	//
 	// The connection returned from Dial must not be in a special state
 	// (subscribed to pubsub channel, transaction started, ...).
-	DialContext func(ctx context.Context) (Conn, error)
+	DialContext func(ctx context.Context) (Conn, error)						// 连接Redis的函数，带context可以设置超时时间
 
 	// TestOnBorrow is an optional application supplied function for checking
 	// the health of an idle connection before the connection is used again by
 	// the application. Argument t is the time that the connection was returned
 	// to the pool. If the function returns an error, then the connection is
 	// closed.
-	// 测试空闲线程是否正常运行的函数
-	TestOnBorrow func(c Conn, t time.Time) error
+	TestOnBorrow func(c Conn, t time.Time) error						    // 测试空闲线程是否正常运行的函数，t是连接被放回连接池的时间
 
 	// Maximum number of idle connections in the pool.
-	// 最大的空闲连接数
-	MaxIdle int
+	MaxIdle int															   // 最大的空闲连接数
 
 	// Maximum number of connections allocated by the pool at a given time.
 	// When zero, there is no limit on the number of connections in the pool.
-	// 最大的活跃连接数，默认0则不限制
-	MaxActive int
+	MaxActive int														// 最大的活跃连接数，等价于 连接池的最大连接数
 
 	// Close connections after remaining idle for this duration. If the value
 	// is zero, then idle connections are not closed. Applications should set
 	// the timeout to a value less than the server's timeout.
-	// 连接的超时时间，默认0则不做超时限制
-	IdleTimeout time.Duration
+	IdleTimeout time.Duration											// 空闲连接的超时时间，连接被放回连接池开始计算
 
 	// If Wait is true and the pool is at the MaxActive limit, then Get() waits
 	// for a connection to be returned to the pool before returning.
-	// 当连接超过数量限制之后，是否等待直到有空闲连接释放
-	Wait bool
+	Wait bool															// 当没有空闲连接时，请求是否阻塞等待空闲连接
 
 	// Close connections older than this duration. If the value is zero, then
 	// the pool does not close connections based on age.
-	MaxConnLifetime time.Duration
+	MaxConnLifetime time.Duration										// 连接池中的链接的最大存活时间，从连接创建时开始计算
 
-	chInitialized uint32 // set to 1 when field ch is initialized
+	chInitialized uint32 // set to 1 when field ch is initialized		// 这个队列用来控制最大连接数的上限，以及当没有空闲连接时，让当前获取连接的请求阻塞等待，前提是 Wait是true
 
 	mu           sync.Mutex    // mu protects the following fields
-	closed       bool          // set to true when the pool is closed.
-	active       int           // the number of open connections in the pool
+	closed       bool          // set to true when the pool is closed.	// 连接池是否关闭
+	active       int           // the number of open connections in the pool		// 连接池的当前连接总数
 	ch           chan struct{} // limits open connections when p.Wait is true
-	idle         idleList      // idle connections
-	waitCount    int64         // total number of connections waited for.
-	waitDuration time.Duration // total time waited for new connections.
+	idle         idleList      // idle connections									// 空闲连接列表
+	waitCount    int64         // total number of connections waited for.			// 阻塞等待空闲连接的数量
+	waitDuration time.Duration // total time waited for new connections.			// 所有阻塞等待请求的等待总时长
 }
 
 // NewPool creates a new pool.
@@ -301,7 +295,8 @@ func (p *Pool) lazyInit() {
 			close(p.ch)
 		} else {
 			for i := 0; i < p.MaxActive; i++ {
-				// 填满ch ???
+				// 这里可以理解为，最多只能从连接池取 MaxActive 个连接，超过会阻塞
+				// 这里的取包括：1.从空闲连接列表取 2.新创建【也可理解为取，因为用完还是放回空闲连接列表】
 				p.ch <- struct{}{}
 			}
 		}
@@ -313,10 +308,13 @@ func (p *Pool) lazyInit() {
 
 // get prunes stale connections and returns a connection from the idle list or
 // creates a new connection.
+// 从连接池中获取连接，有空闲连接，则取空闲连接；没有则创建新的连接
 func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 
 	// Handle limit for p.Wait == true.
 	var waited time.Duration
+
+	// 开启客户端阻塞等待，而且设置了连接池的最大连接数
 	if p.Wait && p.MaxActive > 0 {
 		p.lazyInit()
 
@@ -328,6 +326,8 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 			start = time.Now()
 		}
 		// 从 ch 读取一个元素，如果 ch 为空，这里会阻塞
+		// 也就是说，前 MaxActive个请求，都不会阻塞，因为连接池的最大连接数是 MaxActive
+		// -- 客户端阻塞等待，这里控制了连接池的连接数量上限
 		if ctx == nil {
 			<-p.ch
 		} else {
@@ -338,24 +338,28 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 			}
 		}
 		if wait {
+			// 统计等待时间
 			waited = time.Since(start)
 		}
 	}
 
 	p.mu.Lock()
-
+	// waited > 0 说明有客户端在等待连接
 	if waited > 0 {
-		p.waitCount++
-		p.waitDuration += waited
+		p.waitCount++				// 等待连接的客户端请求数
+		p.waitDuration += waited    // 统计等待客户端的总等待时间
 	}
 
 	// Prune stale connections at the back of the idle list.
 	// 在空闲列表的后面修剪陈旧的连接。
 	if p.IdleTimeout > 0 {
+		// 设置了空间连接的超时时间
+
 		// 空闲连接总数
 		n := p.idle.count
+		// 遍历空闲连接列表中的每个连接，将超时的空闲连接关闭
 		for i := 0; i < n && p.idle.back != nil && p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()); i++ {
-			// p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()): 空闲连接超时
+			// p.idle.back != nil && p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()): 空闲连接超时，即距离空闲连接被放回连接池的时间 > 空闲连接超时时间
 
 			// 暂存空闲列表尾部连接
 			pc := p.idle.back
@@ -368,8 +372,7 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 			pc.c.Close()
 
 			p.mu.Lock()
-
-			// 打开的连接数 -1 【打开连接 == 活跃连接数 + 空闲连接数 ？】
+			// 连接总数【即连接池中的连接总数】 -1
 			p.active--
 		}
 	}
@@ -381,7 +384,9 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 		p.idle.popFront()
 
 		p.mu.Unlock()
-		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&     // 连接有效性测试，对应的是: TestOnBorrow: ping,                  // 检测连接是否有效
+
+		// 连接有效性测试，对应的是: TestOnBorrow: ping
+		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
 			(p.MaxConnLifetime == 0 || nowFunc().Sub(pc.created) < p.MaxConnLifetime) {
 			// 获取连接成功
 			return pc, nil
@@ -401,25 +406,28 @@ func (p *Pool) get(ctx context.Context) (*poolConn, error) {
 	}
 
 	// Handle limit for p.Wait == false.
-	// 活跃连接数达到上限，且 客户端不阻塞等待
+	// 客户端不阻塞等待，设置了连接池上限，且已经达到了连接池上限，这里返回
+	// -- 客户端不阻塞，这里控制了连接池的连接数量上限
 	if !p.Wait && p.MaxActive > 0 && p.active >= p.MaxActive {
 		p.mu.Unlock()
 		return nil, ErrPoolExhausted
 	}
 
-	// 打开连接数+1
+	// 连接池的连接总数+1，因为接下来会重新创建与Redis的连接
 	p.active++
 	p.mu.Unlock()
 
-	// 从Redis获取新连接
+	// 创建与Redis的新连接
 	c, err := p.dial(ctx)
 	// 获取连接失败
 	if err != nil {
 		c = nil
 		p.mu.Lock()
+		// 连接池的连接总数-1
 		p.active--
 		if p.ch != nil && !p.closed {
-			// 进入等待？？？
+			// 因为前面从 ch 读了一个元素，这里创建失败，需要把这个元素放回去，让后面阻塞等待的请求，能继续创建新的Redis连接
+			// 这里可以理解为没取成功
 			p.ch <- struct{}{}
 		}
 		p.mu.Unlock()
@@ -483,6 +491,8 @@ func (p *Pool) put(pc *poolConn, forceClose bool) error {
 	}
 
 	if p.ch != nil && !p.closed {
+		// 用完将连接放回空闲连接列表之后，要往ch里加一个元素
+		// 让后面的阻塞等待的客户端请求，可以继续取连接
 		p.ch <- struct{}{}
 	}
 	p.mu.Unlock()
@@ -640,8 +650,8 @@ type idleList struct {
 
 type poolConn struct {
 	c          Conn
-	t          time.Time
-	created    time.Time
+	t          time.Time  // 调用Close方法，连接放回连接池的时间
+	created    time.Time  // 连接的创建时间
 	next, prev *poolConn
 }
 
