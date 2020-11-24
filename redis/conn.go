@@ -33,7 +33,7 @@ var (
 	_ ConnWithTimeout = (*conn)(nil)
 )
 
-// TODO conn的真正实现
+// TODO conn的真正实现，最底层的conn了，用来表示 客户端和Redis的连接，即记录了客户端和Redis的连接状态
 // conn is the low-level implementation of Conn
 type conn struct {
 	// Shared
@@ -178,6 +178,7 @@ func DialUseTLS(useTLS bool) DialOption {
 
 // Dial connects to the Redis server at the given network and
 // address using the specified options.
+// 客户端和Redis建立连接的最底层逻辑，返回的Conn 是 type conn struct
 func Dial(network, address string, options ...DialOption) (Conn, error) {
 	do := dialOptions{
 		dialer: &net.Dialer{

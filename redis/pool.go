@@ -592,6 +592,7 @@ func (ac *activeConn) DoWithTimeout(timeout time.Duration, commandName string, a
 	return cwt.DoWithTimeout(timeout, commandName, args...)
 }
 
+// iredis 里面用的是 Conn 是 activeConn
 func (ac *activeConn) Send(commandName string, args ...interface{}) error {
 	pc := ac.pc
 	if pc == nil {
